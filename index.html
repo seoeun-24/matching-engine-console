@@ -51,11 +51,11 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:3px 4px;t
   <select id="mode"><option value="uniform">Uniform, ±$5 around $100 (summer baseline)</option><option value="real">Clustered + bursty (random-walk mid, fat tails)</option><option value="csv">Loaded CSV file (real data)</option></select>
   <div class="row" style="margin-top:8px"><button id="sim">Start live flow</button><button id="reset">Reset book</button></div>
   <label>Live flow speed (orders per second)</label><input id="rate" type="range" min="1" max="200" value="20">
-  <label style="margin-top:10px">Real data: CSV with price, qty, and optional side columns</label><input id="csv" type="file" accept=".csv"><div class="note" id="csvmsg"></div><button id="bench" style="margin-top:10px">Run benchmark (10,000 orders, or the loaded CSV)</button>
+  <label style="margin-top:10px">Real data: CSV with price, qty, optional side (select several day files to compare)</label><input id="csv" type="file" accept=".csv" multiple><div class="note" id="csvmsg"></div><button id="bench" style="margin-top:10px">Run benchmark (10,000 orders, or the loaded CSV)</button>
   <div class="note">The benchmark runs on a fresh book, pre-generates orders, and times each add call, as in main.cpp.</div>
  </div>
  <div class="card" style="grid-column:1/-1"><h2>Latency per addOrder (microseconds, averaged over batches)</h2>
-  <div class="scroll"><table class="mono"><thead><tr><th>Run</th><th>n</th><th>Trades</th><th>Orders/s</th><th>mean</th><th>p50</th><th>p95</th><th>p99</th><th>max</th><th>Levels</th></tr></thead><tbody id="stats"></tbody></table></div>
+  <div class="scroll"><table class="mono"><thead><tr><th>Run</th><th>n</th><th>Trades</th><th>Orders/s</th><th>mean</th><th>p50</th><th>p95</th><th>p99</th><th>max</th><th>Levels</th><th>vs first</th></tr></thead><tbody id="stats"></tbody></table></div>
   <div class="note">Browsers clamp performance.now() to about 100 microseconds, so single calls cannot be timed. Mean comes from total time; p50/p95/p99/max are percentiles of 250-order batch averages, so they understate true per-order tails. Compare runs against each other, not against the C++ numbers.</div>
  </div>
 </div>
@@ -139,15 +139,29 @@ function submit(side){
  el('msg').textContent=`#${id}: filled ${filled} of ${qty} in ${f} trade(s)`+(o.qty>0?(market?'; remainder cancelled (no liquidity)':`; ${o.qty} resting`):'');
  render();
 }
-function row(label,n,tr,ops,L,lv){
+function row(label,n,tr,ops,L,lv,vs){
  const f=x=>x.toFixed(2);
- el('stats').insertAdjacentHTML('afterbegin',`<tr><td>${label}</td><td>${n}</td><td>${tr}</td><td>${Math.round(ops).toLocaleString()}</td><td>${f(L.mean)}</td><td>${f(L.p50)}</td><td>${f(L.p95)}</td><td>${f(L.p99)}</td><td>${f(L.max)}</td><td>${lv}</td></tr>`);
+ el('stats').insertAdjacentHTML('afterbegin',`<tr><td>${label}</td><td>${n}</td><td>${tr}</td><td>${Math.round(ops).toLocaleString()}</td><td>${f(L.mean)}</td><td>${f(L.p50)}</td><td>${f(L.p95)}</td><td>${f(L.p99)}</td><td>${f(L.max)}</td><td>${lv}</td><td>${vs||"-"}</td></tr>`);
 }
-let csvOrders=[];
-function bench(){
- const mode=el('mode').value;
- if(mode==='csv'&&!csvOrders.length){el('csvmsg').textContent='Load a CSV first.';return}
- const orders=mode==='csv'?csvOrders.map((o,i)=>({id:i+1,side:o.side,price:o.price,qty:o.qty})):gen(mode,10000);
+let csvSets=[];
+function parseCsv(text){
+ const lines=text.trim().split(/\r?\n/),h=lines[0].split(',').map(x=>x.trim().toLowerCase());
+ const ix=ks=>h.findIndex(x=>ks.some(k=>x.includes(k)));
+ const ip=ix(['price','px']),iq=ix(['qty','quantity','size','amount','volume']),is=ix(['side','buyer_maker','taker']);
+ if(ip<0||iq<0)return{err:'no price/qty columns. Columns seen: '+h.join(', ')};
+ const bm=is>=0&&h[is].includes('buyer_maker');let prev=null;const orders=[];
+ for(let r=1;r<lines.length;r++){
+  const c=lines[r].split(','),p=parseFloat(c[ip]),q=parseFloat(c[iq]);
+  if(!(p>0)||!(q>0))continue;
+  let side;
+  if(is>=0){const v=c[is].trim().toLowerCase();side=bm?(v==='true'?'S':'B'):(['b','buy','bid','1'].includes(v)?'B':'S')}
+  else side=(prev===null||p>=prev)?'B':'S'; // tick rule fallback
+  prev=p;orders.push({side,price:Math.round(p*100),qty:Math.max(1,Math.round(q*1000))});
+ }
+ return{orders,sideFromFile:is>=0};
+}
+function runOne(src){
+ const orders=src.map((o,i)=>({id:i+1,side:o.side,price:o.price,qty:o.qty}));
  const N=orders.length,B=250,b=new Book(),lat=[];
  const T0=performance.now();let s0=T0;
  for(let i=0;i<N;i++){
@@ -155,26 +169,34 @@ function bench(){
   if((i+1)%B===0||i===N-1){const t=performance.now();lat.push((t-s0)*1000/((i%B)+1));s0=t}
  }
  const ms=performance.now()-T0;lat.sort((x,y)=>x-y);
- const L={mean:ms*1000/N,p50:pct(lat,.5),p95:pct(lat,.95),p99:pct(lat,.99),max:lat[lat.length-1]};
- row((mode==='uniform'?'Uniform':mode==='csv'?'CSV':'Clustered')+' (batch of '+B+')',N,b.tradeCount,N/(ms/1000),L,b.bp.length+b.ap.length);
+ return{N,tr:b.tradeCount,ops:N/(ms/1000),lv:b.bp.length+b.ap.length,
+  L:{mean:ms*1000/N,p50:pct(lat,.5),p95:pct(lat,.95),p99:pct(lat,.99),max:lat[lat.length-1]}};
+}
+const fmtD=x=>(x>=0?'+':'')+(x*100).toFixed(1)+'%';
+async function bench(){
+ const mode=el('mode').value;
+ if(mode!=='csv'){const r=runOne(gen(mode,10000));row((mode==='uniform'?'Uniform':'Clustered')+' (batch of 250)',r.N,r.tr,r.ops,r.L,r.lv);return}
+ if(!csvSets.length){el('csvmsg').textContent='Load at least one CSV first.';return}
+ runOne(csvSets[0].orders.slice(0,5000)); // warm-up pass so the first file is not penalized by JIT
+ const res=[];
+ for(const s of csvSets){res.push({name:s.name.slice(0,24),...runOne(s.orders)});await new Promise(r=>setTimeout(r,20))}
+ const base=res[0].ops;
+ for(let i=res.length-1;i>=0;i--){const r=res[i];row(r.name,r.N,r.tr,r.ops,r.L,r.lv,i===0?'baseline':fmtD(r.ops/base-1))}
+ if(res.length>1){
+  const sorted=[...res].sort((x,y)=>y.ops-x.ops),hi=sorted[0],lo=sorted[sorted.length-1];
+  el('csvmsg').textContent=`Compared ${res.length} files. Fastest: ${hi.name} (${Math.round(hi.ops).toLocaleString()} orders/s). Slowest: ${lo.name} (${Math.round(lo.ops).toLocaleString()}). Spread ${fmtD(hi.ops/lo.ops-1)}. Rows are ordered by file name; "vs first" is orders/s relative to the first file.`;
+ }
 }
 el('csv').onchange=async e=>{
- const f=e.target.files[0];if(!f)return;
- const lines=(await f.text()).trim().split(/\r?\n/),h=lines[0].split(',').map(x=>x.trim().toLowerCase());
- const ix=ks=>h.findIndex(x=>ks.some(k=>x.includes(k)));
- const ip=ix(['price','px']),iq=ix(['qty','quantity','size','amount','volume']),is=ix(['side','buyer_maker','taker']);
- if(ip<0||iq<0){csvOrders=[];el('csvmsg').textContent='No price/qty columns found. Columns seen: '+h.join(', ');return}
- const bm=is>=0&&h[is].includes('buyer_maker');let prev=null;const out=[];
- for(let r=1;r<lines.length;r++){
-  const c=lines[r].split(','),p=parseFloat(c[ip]),q=parseFloat(c[iq]);
-  if(!(p>0)||!(q>0))continue;
-  let side;
-  if(is>=0){const v=c[is].trim().toLowerCase();side=bm?(v==='true'?'S':'B'):(['b','buy','bid','1'].includes(v)?'B':'S')}
-  else side=(prev===null||p>=prev)?'B':'S'; // tick rule fallback
-  prev=p;out.push({side,price:Math.round(p*100),qty:Math.max(1,Math.round(q*1000))});
+ const files=[...e.target.files].sort((a,b)=>a.name.localeCompare(b.name));csvSets=[];const msgs=[];
+ for(const f of files){
+  const r=parseCsv(await f.text());
+  if(r.err){msgs.push(f.name+': '+r.err);continue}
+  csvSets.push({name:f.name.replace(/\.csv$/i,''),orders:r.orders});
+  msgs.push(`${f.name}: ${r.orders.length} rows`+(r.sideFromFile?'':' (side by tick rule)'));
  }
- csvOrders=out;el('mode').value='csv';
- el('csvmsg').textContent=out.length?`Loaded ${out.length} rows. Price scaled to cents, qty x1000. ${is>=0?'Side from file.':'No side column: side set by tick rule.'}`:'No usable rows.';
+ if(csvSets.length)el('mode').value='csv';
+ el('csvmsg').textContent=(csvSets.length?`Loaded ${csvSets.length} file(s); price in cents, qty x1000. `:'')+msgs.join(' | ');
 };
 function tick(){
  const rate=parseInt(el('rate').value),n=Math.max(1,Math.round(rate/10));
@@ -191,7 +213,7 @@ el('buy').onclick=()=>submit('B');el('sell').onclick=()=>submit('S');
 el('mine').onclick=e=>{const id=e.target.dataset.id;if(id){book.cancel(+id);render()}};
 el('sim').onclick=()=>{if(sim){clearInterval(sim);sim=null;el('sim').textContent='Start live flow'}else{sim=setInterval(tick,100);el('sim').textContent='Stop live flow'}};
 el('reset').onclick=()=>{book=new Book();mid=10000;render();el('msg').textContent='Book reset.'};
-el('bench').onclick=()=>{el('bench').textContent='Running...';setTimeout(()=>{bench();el('bench').textContent='Run 10,000-order benchmark'},30)};
+el('bench').onclick=async()=>{const t=el('bench').textContent;el('bench').textContent='Running...';await new Promise(r=>setTimeout(r,30));await bench();el('bench').textContent=t};
 el('type').onchange=()=>{el('px').disabled=el('type').value==='Market'};
 render();
 </script></body></html>
