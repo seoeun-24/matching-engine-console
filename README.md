@@ -2,7 +2,7 @@
 
 A browser app around a price-time priority limit order book. It is a JavaScript port of the C++ `std::map` matching engine from my Stony Brook research on low-latency order books (Python vs C++, `std::vector` vs `std::map`).
 
-**Live demo:** https://YOUR-USERNAME.github.io/matching-engine-console/
+**Live demo:** https://seoeun-24.github.io/matching-engine-console/
 
 ## Features
 - Limit and market orders, partial fills, cancel for resting orders
