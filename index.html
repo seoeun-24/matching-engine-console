@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Matching Engine Console</title>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);
+--bg:#f6f7f9;--card:#fff;--ink:#14181f;--mute:#667085;--line:#e3e6eb;--buy:#0a8f5b;--sell:#d1383d;--acc:#2455d6}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0e1116;--card:#171b22;--ink:#e8ebf0;--mute:#8a93a3;--line:#262c36;--buy:#2fc088;--sell:#ff6b70;--acc:#6e93ff}}
+:root[data-theme="dark"]{--bg:#0e1116;--card:#171b22;--ink:#e8ebf0;--mute:#8a93a3;--line:#262c36;--buy:#2fc088;--sell:#ff6b70;--acc:#6e93ff}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;padding:14px}
+h1{font-size:18px;margin:0 0 2px}.sub{color:var(--mute);margin:0 0 12px;font-size:12.5px}
+.grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(290px,1fr))}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;min-width:0}
+.card h2{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--mute);margin:0 0 8px}
+label{display:block;font-size:12px;color:var(--mute);margin:6px 0 2px}
+input,select,button{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:7px 9px;width:100%}
+button{cursor:pointer;font-weight:600}button:hover{border-color:var(--acc)}
+.row{display:flex;gap:8px}.row>*{flex:1}
+.b{background:var(--buy);color:#fff;border-color:var(--buy)}.s{background:var(--sell);color:#fff;border-color:var(--sell)}
+.mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
+.lvl{display:flex;justify-content:space-between;position:relative;padding:2px 6px;font-size:13px}
+.lvl i{position:absolute;top:0;bottom:0;right:0;opacity:.16;z-index:0}
+.lvl span{position:relative;z-index:1}
+.ask i{background:var(--sell)}.bid i{background:var(--buy)}
+.ask .p{color:var(--sell)}.bid .p{color:var(--buy)}
+.mid{text-align:center;padding:5px;margin:3px 0;border-block:1px solid var(--line);color:var(--mute);font-size:12px}
+.tape{max-height:250px;overflow:auto;font-size:12.5px}
+.tape div{display:flex;justify-content:space-between;padding:1px 4px}
+table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:3px 4px;text-align:right;border-bottom:1px solid var(--line)}th:first-child,td:first-child{text-align:left}
+.scroll{overflow-x:auto}.note{font-size:11.5px;color:var(--mute);margin-top:6px}
+.x{cursor:pointer;color:var(--mute);margin-left:6px}
+.msg{min-height:18px;font-size:12px;color:var(--mute);margin-top:6px}
+</style></head><body>
+<h1>Matching Engine Console</h1>
+<p class="sub">Price-time priority limit order book. Port of the C++ std::map engine. Prices in cents internally.</p>
+<div class="grid">
+ <div class="card"><h2>Order entry</h2>
+  <div class="row"><div><label>Type</label><select id="type"><option>Limit</option><option>Market</option></select></div>
+  <div><label>Quantity</label><input id="qty" type="number" min="1" value="10"></div></div>
+  <label>Limit price ($)</label><input id="px" type="number" step="0.01" value="100.00">
+  <div class="row" style="margin-top:10px"><button class="b" id="buy">Buy</button><button class="s" id="sell">Sell</button></div>
+  <div class="msg" id="msg"></div>
+  <h2 style="margin-top:12px">Your resting orders</h2><div id="mine" class="mono tape" style="max-height:110px"></div>
+ </div>
+ <div class="card"><h2>Order book</h2><div id="ladder" class="mono"></div></div>
+ <div class="card"><h2>Trades</h2><div id="tape" class="mono tape"></div></div>
+ <div class="card"><h2>Flow simulator</h2>
+  <label>Order flow model</label>
+  <select id="mode"><option value="uniform">Uniform, ±$5 around $100 (summer baseline)</option><option value="real">Clustered + bursty (random-walk mid, fat tails)</option></select>
+  <div class="row" style="margin-top:8px"><button id="sim">Start live flow</button><button id="reset">Reset book</button></div>
+  <label>Live flow speed (orders per second)</label><input id="rate" type="range" min="1" max="200" value="20">
+  <button id="bench" style="margin-top:10px">Run 10,000-order benchmark</button>
+  <div class="note">The benchmark runs on a fresh book, pre-generates orders, and times each add call, as in main.cpp.</div>
+ </div>
+ <div class="card" style="grid-column:1/-1"><h2>Latency per addOrder (microseconds)</h2>
+  <div class="scroll"><table class="mono"><thead><tr><th>Run</th><th>n</th><th>Trades</th><th>Orders/s</th><th>mean</th><th>p50</th><th>p95</th><th>p99</th><th>max</th><th>Levels</th></tr></thead><tbody id="stats"></tbody></table></div>
+  <div class="note">Browsers clamp performance.now() resolution, so tiny latencies look coarse and are not comparable to the C++ numbers. Compare modes against each other, not against the paper.</div>
+ </div>
+</div>
+<script>
+const C=v=>Math.round(v*100), $=c=>(c/100).toFixed(2);
+class Book{
+ constructor(){this.bids=new Map();this.asks=new Map();this.bp=[];this.ap=[];this.byId=new Map();this.trades=[];this.tradeCount=0}
+ // bp sorted descending, ap sorted ascending: index 0 is always best
+ ins(arr,p,desc){let lo=0,hi=arr.length;while(lo<hi){const m=(lo+hi)>>1;if(desc?arr[m]>p:arr[m]<p)lo=m+1;else hi=m}arr.splice(lo,0,p)}
+ add(o){ // o:{id,side,price(cents),qty,mine}
+  const buy=o.side==='B',lv=buy?this.asks:this.bids,pr=buy?this.ap:this.bp;
+  while(o.qty>0&&pr.length){
+   const best=pr[0];
+   if(buy?o.price<best:o.price>best)break;
+   const q=lv.get(best);let i=0;
+   while(i<q.length&&o.qty>0){
+    const r=q[i],t=Math.min(o.qty,r.qty);
+    this.tradeCount++;this.trades.push({b:buy?o.id:r.id,s:buy?r.id:o.id,p:best,q:t,side:o.side});
+    if(this.trades.length>200)this.trades.shift();
+    o.qty-=t;r.qty-=t;
+    if(r.qty===0){q.splice(i,1);this.byId.delete(r.id)}else i++;
+   }
+   if(q.length===0){lv.delete(best);pr.shift()}
+  }
+  if(o.qty>0&&!o.market){
+   const mine=buy?this.bids:this.asks,mp=buy?this.bp:this.ap;
+   let q=mine.get(o.price);
+   if(!q){q=[];mine.set(o.price,q);this.ins(mp,o.price,buy)}
+   q.push(o);this.byId.set(o.id,o);
+  }
+ }
+ cancel(id){
+  const o=this.byId.get(id);if(!o)return false;
+  const buy=o.side==='B',m=buy?this.bids:this.asks,pr=buy?this.bp:this.ap,q=m.get(o.price);
+  q.splice(q.indexOf(o),1);this.byId.delete(id);
+  if(!q.length){m.delete(o.price);pr.splice(pr.indexOf(o.price),1)}
+  return true;
+ }
+ depth(side,n){const m=side==='B'?this.bids:this.asks,pr=side==='B'?this.bp:this.ap;
+  return pr.slice(0,n).map(p=>({p,q:m.get(p).reduce((a,b)=>a+b.qty,0)}))}
+}
+let book=new Book(),nextId=1,mid=10000,sim=null;
+const el=id=>document.getElementById(id);
+const pct=(a,p)=>a[Math.floor(p*(a.length-1))];
+
+function gen(mode,n){ // returns array of orders (cents)
+ const out=[];let m=10000,burst=0;
+ for(let i=0;i<n;i++){
+  const side=Math.random()<.5?'B':'S';let price;
+  if(mode==='uniform'){price=C(95+Math.random()*10)}
+  else{
+   if(burst===0&&Math.random()<.01)burst=20+Math.floor(Math.random()*40);
+   if(burst>0){burst--;m+=(Math.random()<.5?-1:1)*(Math.random()<.2?3:1)} // bursts move the mid faster
+   else m+=Math.round((Math.random()-.5)*2);
+   // Laplace-like tails: most orders hug the mid, a few far away; side-skewed to keep book crossing sometimes
+   const r=-Math.log(1-Math.random())*(Math.random()<.9?8:60);
+   price=Math.max(1,m+(side==='B'?-1:1)*Math.round(r)+(Math.random()<.3?(side==='B'?12:-12):0));
+  }
+  out.push({id:i+1,side,price,qty:1+Math.floor(Math.random()*50)});
+ }
+ return out;
+}
+function render(){
+ const a=book.depth('S',10).reverse(),b=book.depth('B',10);
+ const mx=Math.max(1,...a.map(x=>x.q),...b.map(x=>x.q));
+ const row=(x,c)=>`<div class="lvl ${c}"><i style="width:${x.q/mx*100}%"></i><span class="p">${$(x.p)}</span><span>${x.q}</span></div>`;
+ const ba=book.ap[0],bb=book.bp[0];
+ const mt=(ba!==undefined&&bb!==undefined)?`spread $${$(ba-bb)} | mid $${$((ba+bb)/2)}`:'no two-sided market';
+ el('ladder').innerHTML=a.map(x=>row(x,'ask')).join('')+`<div class="mid">${mt}</div>`+b.map(x=>row(x,'bid')).join('');
+ el('tape').innerHTML=book.trades.slice(-14).reverse().map(t=>`<div><span style="color:var(--${t.side==='B'?'buy':'sell'})">${$(t.p)}</span><span>${t.q}</span><span style="color:var(--mute)">#${t.b}/#${t.s}</span></div>`).join('')||'<div style="color:var(--mute)">No trades yet</div>';
+ const mine=[...book.byId.values()].filter(o=>o.mine);
+ el('mine').innerHTML=mine.map(o=>`<div><span style="color:var(--${o.side==='B'?'buy':'sell'})">${o.side==='B'?'BUY':'SELL'} ${o.qty} @ ${$(o.price)}</span><span class="x" data-id="${o.id}">cancel</span></div>`).join('')||'<div style="color:var(--mute)">None</div>';
+}
+function submit(side){
+ const qty=parseInt(el('qty').value),market=el('type').value==='Market';
+ const price=market?(side==='B'?1e9:0):C(parseFloat(el('px').value));
+ if(!(qty>0)||(!market&&!(price>0))){el('msg').textContent='Enter a positive quantity and price.';return}
+ const t0=book.tradeCount,id=nextId++,o={id,side,price,qty,mine:true,market};
+ book.add(o);
+ const f=book.tradeCount-t0,filled=qty-o.qty;
+ el('msg').textContent=`#${id}: filled ${filled} of ${qty} in ${f} trade(s)`+(o.qty>0?(market?'; remainder cancelled (no liquidity)':`; ${o.qty} resting`):'');
+ render();
+}
+function row(label,n,tr,ops,L,lv){
+ const f=x=>x.toFixed(2);
+ el('stats').insertAdjacentHTML('afterbegin',`<tr><td>${label}</td><td>${n}</td><td>${tr}</td><td>${Math.round(ops).toLocaleString()}</td><td>${f(L.mean)}</td><td>${f(L.p50)}</td><td>${f(L.p95)}</td><td>${f(L.p99)}</td><td>${f(L.max)}</td><td>${lv}</td></tr>`);
+}
+function bench(){
+ const mode=el('mode').value,N=10000,orders=gen(mode,N),b=new Book(),lat=new Array(N);
+ const T0=performance.now();
+ for(let i=0;i<N;i++){const s=performance.now();b.add(orders[i]);lat[i]=(performance.now()-s)*1000}
+ const ms=performance.now()-T0;lat.sort((x,y)=>x-y);
+ const L={mean:lat.reduce((a,c)=>a+c,0)/N,p50:pct(lat,.5),p95:pct(lat,.95),p99:pct(lat,.99),max:lat[N-1]};
+ row(mode==='uniform'?'Uniform':'Clustered',N,b.tradeCount,N/(ms/1000),L,b.bp.length+b.ap.length);
+}
+function tick(){
+ const rate=parseInt(el('rate').value),n=Math.max(1,Math.round(rate/10));
+ const mode=el('mode').value;
+ for(let i=0;i<n;i++){
+  const side=Math.random()<.5?'B':'S';let p;
+  if(mode==='uniform')p=C(95+Math.random()*10);
+  else{mid+=Math.round((Math.random()-.5)*2);const r=-Math.log(1-Math.random())*(Math.random()<.9?8:60);p=Math.max(1,mid+(side==='B'?-1:1)*Math.round(r))}
+  book.add({id:nextId++,side,price:p,qty:1+Math.floor(Math.random()*50),mine:false});
+ }
+ render();
+}
+el('buy').onclick=()=>submit('B');el('sell').onclick=()=>submit('S');
+el('mine').onclick=e=>{const id=e.target.dataset.id;if(id){book.cancel(+id);render()}};
+el('sim').onclick=()=>{if(sim){clearInterval(sim);sim=null;el('sim').textContent='Start live flow'}else{sim=setInterval(tick,100);el('sim').textContent='Stop live flow'}};
+el('reset').onclick=()=>{book=new Book();mid=10000;render();el('msg').textContent='Book reset.'};
+el('bench').onclick=()=>{el('bench').textContent='Running...';setTimeout(()=>{bench();el('bench').textContent='Run 10,000-order benchmark'},30)};
+el('type').onchange=()=>{el('px').disabled=el('type').value==='Market'};
+render();
+</script></body></html>
